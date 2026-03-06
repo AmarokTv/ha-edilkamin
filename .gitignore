@@ -306,5 +306,3 @@ FPO_TEST/diagnostic_local.py
 # Allow safe template and documentation
 !FPO_TEST/diagnostic_template.py
 !FPO_TEST/README.md
-!FPO_TEST/POWERSHELL_USAGE.md
-
