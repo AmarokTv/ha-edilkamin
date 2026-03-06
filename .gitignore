@@ -255,11 +255,6 @@ cython_debug/
 # ============================================================================
 # NEVER commit files containing credentials, passwords, or personal data
 
-# Diagnostic and test files with hardcoded credentials
-FPO_TEST/diagnostic_complet.py
-FPO_TEST/diagnostic_*.py
-FPO_TEST/*.py
-
 # Configuration files with credentials
 .env
 .env.local
