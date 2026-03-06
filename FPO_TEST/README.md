@@ -124,4 +124,23 @@ Ces packages sont déjà dans `pyproject.toml`
 
 **Status**: ✅ Production Ready
 **Dernière mise à jour**: 2026-03-06
+**TEST 5 Ajout**: 2026-03-06 - Test de changement de température
+
+---
+
+## 🚨 Erreur 504 lors du changement de température ?
+
+Si le TEST 5 retourne une erreur **504 (Bad Gateway)**, consultez le guide complet :
+
+👉 **[DIAGNOSTIC_504.md](./DIAGNOSTIC_504.md)**
+
+**Causes probables** :
+1. ❌ Poêle en mode "Standby" ou "Chrono" (même s'il est allumé)
+2. ❌ Poêle en phase de refroidissement ("Cooling")
+3. ❌ Conflit de commandes ou rate limiting
+4. ⚠️ Token d'authentification invalide
+
+**Important** : L'erreur 504 = le serveur **REJETTE la requête**, ce n'est pas un timeout !
+
+Le diagnostic amélioré affiche maintenant TOUS les modes du poêle pour vous aider à diagnostiquer le problème.
 

@@ -18,6 +18,6 @@
     "@Amarok38"
   ],
   "iot_class": "cloud_polling",
-  "python_version": ">=3.10.0",
+  "python_version": ">=3.13.2",
   "version": "5.0.0"
 }
