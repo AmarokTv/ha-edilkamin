@@ -3,7 +3,7 @@
   "name": "Edilkamin",
   "config_flow": true,
   "integration_type": "device",
-  "documentation": "https://github.com/algra4/ha-edilkamin",
+  "documentation": "https://github.com/Amarok38/ha-edilkamin",
   "requirements": [
     "httpx>=0.24.0",
     "pycognito>=1.5.0",
@@ -15,8 +15,9 @@
   "homekit": {},
   "dependencies": [],
   "codeowners": [
-    "@algra4"
+    "@Amarok38"
   ],
   "iot_class": "cloud_polling",
-  "version": "v4.8.0"
+  "python_version": ">=3.10.0",
+  "version": "5.0.0"
 }
