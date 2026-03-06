@@ -296,4 +296,15 @@ venv/
 env/
 .venv/
 
+# ============================================================================
+# FPO_TEST: Diagnostic scripts
+# ============================================================================
+# Ignore files with hardcoded credentials
+FPO_TEST/diagnostic_complet.py
+FPO_TEST/diagnostic_local.py
+
+# Allow safe template and documentation
+!FPO_TEST/diagnostic_template.py
+!FPO_TEST/README.md
+!FPO_TEST/POWERSHELL_USAGE.md
 
