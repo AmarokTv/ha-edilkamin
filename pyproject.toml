@@ -1,0 +1,80 @@
+[project]
+name = "ha-edilkamin"
+version = "0.1.0"
+requires-python = ">=3.10.0"
+dependencies = [
+    "httpx>=0.24.0",
+    "pycognito>=1.5.0",
+    "anyio>=3.0.0",
+    "macaddress==2.0.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==8.4.2",
+    "pytest-cov==7.0.0",
+    "pytest-aiohttp==1.1.0",
+    "homeassistant==2025.5.0",
+    "ruff==0.13.3",
+    "pre-commit-uv>=4.1.5",
+    "pyjwt>=2.10.0",
+]
+
+[tool.coverage.run]
+source = ["custom_components"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplemented()",
+    "if __name__ == '__main__':",
+    "main()",
+]
+show_missing = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = [".git"]
+addopts = [
+    "--strict",
+    "--cov=custom_components",
+]
+
+[tool.ruff]
+# Align with previous Black/isort style
+line-length = 88
+# Target current Python version for better linting
+target-version = "py313"
+
+[tool.ruff.lint]
+# Enable common linting rules and import sorting (isort replacement)
+select = [ "ALL" ]
+# Keep prior ignores from flake8
+ignore = [
+    "S101",
+    "ANN",
+    "PLR2004",
+    "SLF001",
+    "D",
+    "COM812",  # Avoid conflict with formatter
+]
+
+[tool.ruff.lint.isort]
+# Carry over isort behavior
+combine-as-imports = true
+force-sort-within-sections = true
+known-first-party = ["custom_components", "tests"]
+
+[tool.ruff.format]
+# If you use `ruff format`, keep it Black-compatible
+quote-style = "preserve"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.13"
+ignore_errors = true
+follow_imports = "silent"
+ignore_missing_imports = true
+warn_incomplete_stub = true
+warn_redundant_casts = true
+warn_unused_configs = true

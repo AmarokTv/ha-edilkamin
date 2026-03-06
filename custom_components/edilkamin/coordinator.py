@@ -1,0 +1,362 @@
+from datetime import datetime, timedelta, timezone
+import asyncio
+import logging
+
+import async_timeout
+from custom_components.edilkamin.external_edilkamin import (
+    device_info,
+    sign_in,
+)
+from custom_components.edilkamin.const import (
+    UPDATE_INTERVAL_SECONDS,
+    API_TIMEOUT_SECONDS,
+    ADAPTIVE_INTERVAL_MIN_SECONDS,
+    ADAPTIVE_INTERVAL_MAX_SECONDS,
+    ADAPTIVE_INTERVAL_NORMAL_SECONDS,
+    TIME_TO_LONG_INTERVAL_SECONDS,
+)
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+import jwt
+
+from custom_components.edilkamin.api.edilkamin_async_api import EdilkaminAsyncApi
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class EdilkaminCoordinator(DataUpdateCoordinator):
+    """Coordinator for Edilkamin integration."""
+
+    def __init__(
+        self,
+        hass,
+        username: str,
+        password: str,
+        mac_address: str,
+    ) -> None:
+        """Initialize the coordinator."""
+        super().__init__(
+            hass,
+            _LOGGER,
+            name="Edilkamin coordinator",
+            update_interval=timedelta(seconds=UPDATE_INTERVAL_SECONDS),
+        )
+        self._username = username
+        self._password = password
+        self._mac_address = mac_address
+
+        self._token = None
+        self._device_info = {}
+        self._last_device_info = None  # For change detection
+        self._last_change_time = datetime.now(tz=timezone.utc)  # For adaptive interval
+        self._edilkamin_wrapper = EdilkaminAsyncApi(
+            mac_address=mac_address, username=username, password=password, hass=hass
+        )
+
+    async def refresh_token(self) -> str:
+        """Refresh the token only if expired."""
+        _LOGGER.debug("Refreshing token")
+        if self._token is None or self.is_token_expired(self._token):
+            _LOGGER.debug("Token is expired or None, signing in again")
+            try:
+                self._token = await self.hass.async_add_executor_job(
+                    sign_in, self._username, self._password
+                )
+                _LOGGER.debug("Token refreshed successfully")
+            except Exception as e:
+                msg = f"Failed to authenticate with Edilkamin API: {type(e).__name__}"
+                _LOGGER.error(msg)
+                raise UpdateFailed(msg) from e
+        else:
+            _LOGGER.debug("Token is still valid, using existing one")
+
+        return self._token
+
+    def is_token_expired(self, token: str) -> bool:
+        """Check if the token is expired."""
+        try:
+            payload = jwt.decode(token, options={"verify_signature": False})
+            exp = payload.get("exp")
+            if exp is None:
+                return True
+            exp_date = datetime.fromtimestamp(exp, tz=timezone.utc)
+            # Add a buffer of 60 seconds to the expiration time
+            return exp_date < datetime.now(tz=timezone.utc) + timedelta(seconds=60)
+        except (jwt.PyJWTError, KeyError):
+            return True
+        except Exception:  # noqa: BLE001
+            return True
+
+    def _has_changed(self, new_info: dict) -> bool:
+        """Detect if device state has changed significantly."""
+        if self._last_device_info is None:
+            return True  # First time always considered as changed
+
+        old = self._last_device_info
+        new = new_info
+
+        # Check status state
+        old_state = old.get("status", {}).get("state", {}).get("stove_state")
+        new_state = new.get("status", {}).get("state", {}).get("stove_state")
+        if old_state != new_state:
+            _LOGGER.debug("Device state changed: %s -> %s", old_state, new_state)
+            return True
+
+        # Check power
+        old_power = old.get("status", {}).get("state", {}).get("actual_power")
+        new_power = new.get("status", {}).get("state", {}).get("actual_power")
+        if old_power != new_power:
+            _LOGGER.debug("Device power changed: %s -> %s", old_power, new_power)
+            return True
+
+        # Check temperatures (with 0.5°C threshold to ignore fluctuations)
+        old_temps = old.get("status", {}).get("temperatures", {})
+        new_temps = new.get("status", {}).get("temperatures", {})
+        if self._temps_changed(old_temps, new_temps):
+            return True
+
+        # Check fans
+        old_fans = old.get("status", {}).get("fans", {})
+        new_fans = new.get("status", {}).get("fans", {})
+        if old_fans != new_fans:
+            _LOGGER.debug("Fan speeds changed")
+            return True
+
+        # Check target temperature
+        old_target = (
+            old.get("nvm", {})
+            .get("user_parameters", {})
+            .get("enviroment_1_temperature")
+        )
+        new_target = (
+            new.get("nvm", {})
+            .get("user_parameters", {})
+            .get("enviroment_1_temperature")
+        )
+        if old_target != new_target:
+            _LOGGER.debug("Target temperature changed: %s -> %s", old_target, new_target)
+            return True
+
+        return False
+
+    def _temps_changed(self, old_temps: dict, new_temps: dict, threshold: float = 0.5) -> bool:
+        """Check if temperatures changed more than threshold."""
+        for key in ["enviroment", "thermocouple", "board", "feeler_ntc_1"]:
+            old_val = old_temps.get(key)
+            new_val = new_temps.get(key)
+
+            # Skip if either value is missing
+            if old_val is None or new_val is None:
+                continue
+
+            # Check if change exceeds threshold
+            if abs(float(old_val) - float(new_val)) > threshold:
+                _LOGGER.debug("Temperature %s changed: %.1f -> %.1f",
+                            key, old_val, new_val)
+                return True
+
+        return False
+
+    async def update_device_information(self):
+        """Get the latest data and update the relevant Entity attributes."""
+        try:
+            self._token = await self.refresh_token()
+        except Exception as e:
+            msg = f"Authentication error: Failed to refresh token: {str(e)}"
+            _LOGGER.error(msg)
+            raise UpdateFailed(msg) from e
+
+        try:
+            return await self.hass.async_add_executor_job(
+                device_info, self._token, self._mac_address
+            )
+        except Exception as e:
+            msg = f"Failed to fetch device info: {type(e).__name__}: {str(e)}"
+            _LOGGER.error(msg)
+            raise UpdateFailed(msg) from e
+
+    async def _async_update_data(self):
+        """Fetch data from the API."""
+        try:
+            async with async_timeout.timeout(API_TIMEOUT_SECONDS):
+                self._device_info = await self.update_device_information()
+                _LOGGER.debug("Data updated successfully")
+                _LOGGER.debug(self._device_info)
+
+                # Detect changes and adapt interval
+                if self._has_changed(self._device_info):
+                    _LOGGER.info("Device state changed, using fast interval (%ds)",
+                               ADAPTIVE_INTERVAL_MIN_SECONDS)
+                    self.update_interval = timedelta(seconds=ADAPTIVE_INTERVAL_MIN_SECONDS)
+                    self._last_change_time = datetime.now(tz=timezone.utc)
+                else:
+                    # No change detected - adapt interval based on time since last change
+                    time_since_change = (
+                        datetime.now(tz=timezone.utc) - self._last_change_time
+                    ).total_seconds()
+
+                    if time_since_change > TIME_TO_LONG_INTERVAL_SECONDS:
+                        # No change for 5+ minutes - use slow interval
+                        _LOGGER.debug("No changes for %d seconds, using slow interval (%ds)",
+                                    time_since_change, ADAPTIVE_INTERVAL_MAX_SECONDS)
+                        self.update_interval = timedelta(seconds=ADAPTIVE_INTERVAL_MAX_SECONDS)
+                    else:
+                        # Recent change - use normal interval
+                        self.update_interval = timedelta(seconds=ADAPTIVE_INTERVAL_NORMAL_SECONDS)
+
+                # Store for next comparison
+                self._last_device_info = self._device_info.copy()
+
+                return self._device_info
+        except asyncio.TimeoutError as e:
+            msg = f"Timeout communicating with Edilkamin API ({API_TIMEOUT_SECONDS} seconds)"
+            _LOGGER.error(msg)
+            raise UpdateFailed(msg) from e
+        except ConnectionError as e:
+            msg = "Connection error communicating with Edilkamin API"
+            _LOGGER.error(msg)
+            raise UpdateFailed(msg) from e
+        except Exception as e:
+            msg = f"Error communicating with Edilkamin API: {type(e).__name__}: {str(e)}"
+            _LOGGER.error(msg)
+            raise UpdateFailed(msg) from e
+
+    def get_token(self) -> str:
+        """Return the current token."""
+        return self._token
+
+    def get_mac_address(self) -> str:
+        """Return the MAC address."""
+        return self._mac_address
+
+    def get_temperature(self) -> float | None:
+        """Get the environment temperature."""
+        return (
+            self._device_info.get("status", {})
+            .get("temperatures", {})
+            .get("enviroment")
+        )
+
+    def get_fan_speed(self, index: int = 1) -> str:
+        """Get the fan speed."""
+        return (
+            self._device_info.get("nvm", {})
+            .get("user_parameters", {})
+            .get(f"fan_{index}_ventilation")
+        )
+
+    def get_nb_fans(self) -> int:
+        """Get the number of fans."""
+        return (
+            self._device_info.get("nvm", {})
+            .get("installer_parameters", {})
+            .get("fans_number", 0)
+        )
+
+    def get_nb_alarms(self) -> int:
+        """Get the number of alarms."""
+        return self._device_info.get("nvm", {}).get("alarms_log", {}).get("index", 0)
+
+    def get_alarms(self) -> list:
+        """Get the alarms."""
+        alarms_info = self._device_info.get("nvm", {}).get("alarms_log", {})
+        index = alarms_info.get("index", 0)
+        alarms = alarms_info.get("alarms", [])
+        return [alarms[i] for i in range(min(index, len(alarms)))]
+
+    def get_actual_power(self) -> str | None:
+        """Get the actual power."""
+        return self._device_info.get("status", {}).get("state", {}).get("actual_power")
+
+    def get_status_tank(self) -> str | None:
+        """Get the status of the tank."""
+        return (
+            self._device_info.get("status", {})
+            .get("flags", {})
+            .get("is_pellet_in_reserve")
+        )
+
+    def get_airkare_status(self) -> str:
+        """Get the status of the airkare."""
+        return (
+            self._device_info.get("status", {})
+            .get("flags", {})
+            .get("is_airkare_active")
+        )
+
+    def get_power_status(self) -> str:
+        """Get the status of the power."""
+        return self._device_info.get("status", {}).get("commands", {}).get("power")
+
+    def get_relax_status(self) -> str:
+        """Get the status of the relax."""
+        return (
+            self._device_info.get("status", {}).get("flags", {}).get("is_relax_active")
+        )
+
+    def get_target_temperature(self) -> str:
+        """Get the target temperature."""
+        return (
+            self._device_info.get("nvm", {})
+            .get("user_parameters", {})
+            .get("enviroment_1_temperature")
+        )
+
+    def get_chrono_mode_status(self) -> str:
+        """Get the status of the chrono mode."""
+        return self._device_info.get("nvm", {}).get("chrono", {}).get("is_active")
+
+    def get_operational_phase(self) -> str:
+        """Get the operational phase."""
+        return (
+            self._device_info.get("status", {})
+            .get("state", {})
+            .get("operational_phase")
+        )
+
+    def get_autonomy_second(self) -> str | None:
+        """Get the autonomy time."""
+        return (
+            self._device_info.get("status", {})
+            .get("pellet", {})
+            .get("autonomy_time", None)
+        )
+
+    def get_standby_mode(self) -> bool:
+        """Get standby mode."""
+        return (
+            self._device_info.get("nvm", {})
+            .get("user_parameters", {})
+            .get("is_standby_active", False)
+        )
+
+    def get_standby_waiting_time(self) -> str | None:
+        """Get standby waiting time."""
+        return (
+            self._device_info.get("nvm", {})
+            .get("user_parameters", {})
+            .get("standby_waiting_time", None)
+        )
+
+    def get_power_ons(self) -> str | None:
+        """Get the number of power ons."""
+        return (
+            self._device_info.get("nvm", {})
+            .get("total_counters", {})
+            .get("power_ons", None)
+        )
+
+    def is_auto(self) -> bool:
+        """Check if the device is in auto mode."""
+        return (
+            self._device_info.get("nvm", {})
+            .get("user_parameters", {})
+            .get("is_auto", False)
+        )
+
+    def get_manual_power(self):
+        """Get the manual mode."""
+        return (
+            self._device_info.get("nvm", {})
+            .get("user_parameters", {})
+            .get("manual_power")
+        )
